@@ -11,19 +11,41 @@ import meshtastic.tcp_interface  # type: ignore
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
 # --- Config ---
-HOST = "192.168.0.91"          # Meshtastic node IP (your gateway)
-REFRESH_EVERY = 5.0            # console table refresh seconds
-SHOW_UNKNOWN = True
-SHOW_PER_PACKET = True
-LOG_TO_CSV = True
-LOG_PREFIX = "meshtastic_log"
+def get_env_bool(key: str, default: bool) -> bool:
+    """Get boolean environment variable with fallback."""
+    val = os.getenv(key, "").lower()
+    if val in ("true", "1", "yes", "on"): return True
+    if val in ("false", "0", "no", "off"): return False
+    return default
+
+def get_env_float(key: str, default: float) -> float:
+    """Get float environment variable with fallback."""
+    try:
+        return float(os.getenv(key, str(default)))
+    except (ValueError, TypeError):
+        return default
+
+def get_env_int(key: str, default: int) -> int:
+    """Get integer environment variable with fallback."""
+    try:
+        return int(os.getenv(key, str(default)))
+    except (ValueError, TypeError):
+        return default
+
+HOST = os.getenv("MESH_HOST", "192.168.0.91")          # Meshtastic node IP (your gateway)
+REFRESH_EVERY = get_env_float("REFRESH_EVERY", 5.0)     # console table refresh seconds
+SHOW_UNKNOWN = get_env_bool("SHOW_UNKNOWN", True)
+SHOW_PER_PACKET = get_env_bool("SHOW_PER_PACKET", True)
+LOG_TO_CSV = get_env_bool("LOG_TO_CSV", True)
+LOG_PREFIX = os.getenv("LOG_PREFIX", "meshtastic_log")
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-API_HOST, API_PORT = "127.0.0.1", 8080
+API_HOST = os.getenv("API_HOST", "127.0.0.1")
+API_PORT = get_env_int("API_PORT", 8080)
 
 # History / chat
-HISTORY_MAXLEN = 300           # chart: last N points per node
-HISTORY_SAMPLE_SECS = 2.0      # chart: min spacing between points
-MAX_MSGS_PER_CONV = 2000       # chat: per-conversation ring size
+HISTORY_MAXLEN = get_env_int("HISTORY_MAXLEN", 300)           # chart: last N points per node
+HISTORY_SAMPLE_SECS = get_env_float("HISTORY_SAMPLE_SECS", 2.0)      # chart: min spacing between points
+MAX_MSGS_PER_CONV = get_env_int("MAX_MSGS_PER_CONV", 2000)       # chat: per-conversation ring size
 
 # --- Console handoff ---
 outq: "queue.Queue[tuple[str, object]]" = queue.Queue()

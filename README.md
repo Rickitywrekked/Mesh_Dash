@@ -1,104 +1,182 @@
 # Mesh_Dash
-A python script that connects a computer to a WiFi enabled Meshtastic Node and displays your local node data into easily digested infographics.
 
-Meshtastic Live Dashboard + Messenger (Python)
+A lightweight Python web dashboard and messenger for Meshtastic networks. Connects to a Wi-Fi-enabled Meshtastic node over TCP and displays real-time node data through an intuitive web interface.
 
-A lightweight, zero-dependency (std-lib only) web dashboard & messenger for Meshtastic networks.
-It connects to a Wi-Fi–enabled Meshtastic node over TCP (port 4403), ingests packets in real time, and provides:
+## Overview
 
-A live dashboard (cards + table) with friendly names, telemetry, GPS, and mini-charts (battery/temp).
+This zero-dependency (standard library only) web application connects to a Meshtastic node via TCP (port 4403), ingests packets in real time, and provides:
 
-A messenger UI that groups conversations by pair (A⇄B) or broadcast and lets you reply directly from the browser.
+- **Live dashboard** with friendly names, telemetry, GPS data, and mini-charts (battery/temperature)
+- **Messenger interface** that groups conversations by node pairs (A⇄B) or broadcasts
+- **Optional CSV logging** with daily file rotation
+- **JSON HTTP API** for scripting and automation
 
-Optional CSV logging (daily files).
+No external backend required. The web UI is served directly by the Python script, with chart rendering via CDN-hosted Chart.js.
 
-A small JSON HTTP API you can script against.
+## Features
 
-No external backend required. The web UI is served by the Python script itself. Chart rendering is via CDN-hosted Chart.js.
+### Core Functionality
+- Connects via `meshtastic.tcp_interface.TCPInterface` to node at HOST:4403
+- Learns and displays friendly names from node list (longName/shortName)
+- Merges packets into per-node summaries with last updated timestamps
+- Tracks rolling history per node for chart visualization
 
+### Messaging
+- Auto-detects "my node" (the dashboard-connected device) on first direct message
+- **Conversation pairing**: each thread shows exactly two nodes in one place (no duplicates)
+- **Smart reply targeting**: always replies to the other node; defaults to last sender if "me" is unknown
+- Supports broadcast messaging (`^all`)
 
-Features
+### Data Management
+- CSV logging per day (`meshtastic_log_YYYY-MM-DD.csv`)
+- Simple JSON API endpoints: `/api/health`, `/api/nodes`, `/api/history`, `/api/send`
 
-Connects via meshtastic.tcp_interface.TCPInterface to a node at HOST:4403.
+## Requirements
 
-Learns friendly names from the node list (longName/shortName) and displays them everywhere.
+- **Python 3.9+** (Windows/macOS/Linux)
+- **Meshtastic Python libraries**:
+  ```bash
+  pip install meshtastic pypubsub
+  ```
+- **Meshtastic ESP32 node** on Wi-Fi with TCP server enabled (default port 4403)
+- Node's IP address
 
-Merges packets into a per-node summary (last updated time).
+> **Note**: `from pubsub import pub` comes from the PyPubSub package (`pypubsub` on pip).
 
-Tracks rolling history per node for charts (tunable buffer length).
+## Getting Started
 
-Messenger:
+### 1. Clone and Setup
 
-Auto-detects “my node” (the dashboard-connected device) on first direct message.
-
-Conversation pairing: each thread is between exactly two nodes, shown in one place (no duplicates).
-
-Smart default reply target: always the other node; if “me” isn’t known yet, replies go to the last sender in the thread.
-
-Supports broadcast messaging (^all).
-
-CSV logging per day (meshtastic_log_YYYY-MM-DD.csv).
-
-Simple JSON API: /api/health, /api/nodes, /api/history, /api/send.
-
-
-Requirements
-
-Python 3.9+ (works on Windows/macOS/Linux).
-
-Meshtastic Python libs:
-
-pip install meshtastic pypubsub
-
-
-from pubsub import pub comes from the PyPubSub package (pypubsub on pip).
-
-A Meshtastic ESP32 node on Wi-Fi with TCP server enabled (default port 4403), and you know its IP address.
-
-
-https://github.com/Rickitywrekked/Mesh_Dash.git
-
-Getting Started
-
-Clone the repo and open a terminal in the project folder:
-
+```bash
 git clone https://github.com/Rickitywrekked/Mesh_Dash.git
-cd <repo>
+cd Mesh_Dash
+```
 
+### 2. Virtual Environment (Recommended)
 
-(Recommended) create a virtual env and install deps:
-
+```bash
 python -m venv .venv
+
 # Windows
 .venv\Scripts\activate
+
 # macOS/Linux
 source .venv/bin/activate
 
 pip install --upgrade pip
 pip install meshtastic pypubsub
+```
 
+### 3. Configuration
 
-Configure the script:
+The application can be configured using environment variables or by editing the constants in `mesh_listen.py`.
 
-Open your main file (e.g., mesh_listen_v13.py or mesh_listen_v8_dash.py) and set the constants near the top:
+#### Environment Variables
 
-HOST = "192.168.0.91"   # <-- your node's IP
-API_HOST, API_PORT = "127.0.0.1", 8080
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MESH_HOST` | `192.168.0.91` | Meshtastic node IP address |
+| `API_HOST` | `127.0.0.1` | Web server bind address |
+| `API_PORT` | `8080` | Web server port |
+| `LOG_TO_CSV` | `true` | Enable CSV logging |
+| `LOG_PREFIX` | `meshtastic_log` | Prefix for log files |
+| `REFRESH_EVERY` | `5.0` | Console refresh interval (seconds) |
+| `SHOW_UNKNOWN` | `true` | Show unknown packet types |
+| `SHOW_PER_PACKET` | `true` | Show per-packet debug info |
+| `HISTORY_MAXLEN` | `300` | Max history points per node for charts |
+| `HISTORY_SAMPLE_SECS` | `2.0` | Min time between history samples |
+| `MAX_MSGS_PER_CONV` | `2000` | Max messages per conversation |
+
+#### Setting Environment Variables
+
+**Linux/macOS:**
+```bash
+export MESH_HOST="192.168.1.100"
+export API_HOST="0.0.0.0"
+export API_PORT="9090"
+python mesh_listen.py
+```
+
+**Windows:**
+```cmd
+set MESH_HOST=192.168.1.100
+set API_HOST=0.0.0.0
+set API_PORT=9090
+python mesh_listen.py
+```
+
+**Alternative: Edit Source Code**
+
+You can also modify the constants directly in `mesh_listen.py`:
+
+```python
+HOST = "192.168.0.91"   # Your node's IP address
+API_HOST = "127.0.0.1"
+API_PORT = 8080
 LOG_TO_CSV = True
+```
 
+> **Tip**: Keep `API_HOST = "127.0.0.1"` for local use. To access the dashboard from other devices on your LAN, change to `API_HOST = "0.0.0.0"` and configure your firewall accordingly.
 
-Tip: Keep API_HOST = 127.0.0.1 for local use. If you want to view the dashboard from other devices on your LAN, change to API_HOST = "0.0.0.0" and allow the port in your firewall.
+### 4. Run the Application
 
-Run it:
+```bash
+python mesh_listen.py
+```
 
-python mesh_listen_v13.py
+### 5. Access the Dashboard
 
-
-Open the dashboard:
-
+Open your browser and navigate to:
+```
 http://127.0.0.1:8080/
+```
 
+You should see the live cards and table. Click into **Messenger** in the UI to view and reply to conversation threads.
 
-You should see the live cards and table. Click into Messenger (in the UI) to view and reply to threads.
+## Docker Usage
+
+### Build and Run
+
+```bash
+# Build the Docker image
+docker build -t mesh-dash .
+
+# Run with default settings
+docker run -p 8080:8080 mesh-dash
+
+# Run with custom environment variables
+docker run -p 9090:9090 \
+  -e MESH_HOST="192.168.1.100" \
+  -e API_PORT="9090" \
+  -e LOG_TO_CSV="false" \
+  mesh-dash
+```
+
+### Docker Compose
+
+Create a `docker-compose.yml` file:
+
+```yaml
+version: '3.8'
+services:
+  mesh-dash:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - MESH_HOST=192.168.1.100
+      - API_HOST=0.0.0.0
+      - API_PORT=8080
+      - LOG_TO_CSV=true
+    volumes:
+      - ./logs:/app/logs  # Optional: persist logs
+    restart: unless-stopped
+```
+
+Run with: `docker-compose up -d`
+
+### Environment Variables in Docker
+
+All configuration options can be set using environment variables when running the container. See the [Environment Variables](#environment-variables) section above for a complete list.
 
 
