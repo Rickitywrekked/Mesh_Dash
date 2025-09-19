@@ -69,11 +69,50 @@ pip install meshtastic pypubsub
 
 ### 3. Configuration
 
-Open your main file (e.g., `mesh_listen.py`) and set the constants near the top:
+The application can be configured using environment variables or by editing the constants in `mesh_listen.py`.
+
+#### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MESH_HOST` | `192.168.0.91` | Meshtastic node IP address |
+| `API_HOST` | `127.0.0.1` | Web server bind address |
+| `API_PORT` | `8080` | Web server port |
+| `LOG_TO_CSV` | `true` | Enable CSV logging |
+| `LOG_PREFIX` | `meshtastic_log` | Prefix for log files |
+| `REFRESH_EVERY` | `5.0` | Console refresh interval (seconds) |
+| `SHOW_UNKNOWN` | `true` | Show unknown packet types |
+| `SHOW_PER_PACKET` | `true` | Show per-packet debug info |
+| `HISTORY_MAXLEN` | `300` | Max history points per node for charts |
+| `HISTORY_SAMPLE_SECS` | `2.0` | Min time between history samples |
+| `MAX_MSGS_PER_CONV` | `2000` | Max messages per conversation |
+
+#### Setting Environment Variables
+
+**Linux/macOS:**
+```bash
+export MESH_HOST="192.168.1.100"
+export API_HOST="0.0.0.0"
+export API_PORT="9090"
+python mesh_listen.py
+```
+
+**Windows:**
+```cmd
+set MESH_HOST=192.168.1.100
+set API_HOST=0.0.0.0
+set API_PORT=9090
+python mesh_listen.py
+```
+
+**Alternative: Edit Source Code**
+
+You can also modify the constants directly in `mesh_listen.py`:
 
 ```python
 HOST = "192.168.0.91"   # Your node's IP address
-API_HOST, API_PORT = "127.0.0.1", 8080
+API_HOST = "127.0.0.1"
+API_PORT = 8080
 LOG_TO_CSV = True
 ```
 
@@ -93,5 +132,51 @@ http://127.0.0.1:8080/
 ```
 
 You should see the live cards and table. Click into **Messenger** in the UI to view and reply to conversation threads.
+
+## Docker Usage
+
+### Build and Run
+
+```bash
+# Build the Docker image
+docker build -t mesh-dash .
+
+# Run with default settings
+docker run -p 8080:8080 mesh-dash
+
+# Run with custom environment variables
+docker run -p 9090:9090 \
+  -e MESH_HOST="192.168.1.100" \
+  -e API_PORT="9090" \
+  -e LOG_TO_CSV="false" \
+  mesh-dash
+```
+
+### Docker Compose
+
+Create a `docker-compose.yml` file:
+
+```yaml
+version: '3.8'
+services:
+  mesh-dash:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - MESH_HOST=192.168.1.100
+      - API_HOST=0.0.0.0
+      - API_PORT=8080
+      - LOG_TO_CSV=true
+    volumes:
+      - ./logs:/app/logs  # Optional: persist logs
+    restart: unless-stopped
+```
+
+Run with: `docker-compose up -d`
+
+### Environment Variables in Docker
+
+All configuration options can be set using environment variables when running the container. See the [Environment Variables](#environment-variables) section above for a complete list.
 
 
