@@ -56,3 +56,49 @@ from pubsub import pub comes from the PyPubSub package (pypubsub on pip).
 A Meshtastic ESP32 node on Wi-Fi with TCP server enabled (default port 4403), and you know its IP address.
 
 
+https://github.com/Rickitywrekked/Mesh_Dash.git
+
+Getting Started
+
+Clone the repo and open a terminal in the project folder:
+
+git clone https://github.com/Rickitywrekked/Mesh_Dash.git
+cd <repo>
+
+
+(Recommended) create a virtual env and install deps:
+
+python -m venv .venv
+# Windows
+.venv\Scripts\activate
+# macOS/Linux
+source .venv/bin/activate
+
+pip install --upgrade pip
+pip install meshtastic pypubsub
+
+
+Configure the script:
+
+Open your main file (e.g., mesh_listen_v13.py or mesh_listen_v8_dash.py) and set the constants near the top:
+
+HOST = "192.168.0.91"   # <-- your node's IP
+API_HOST, API_PORT = "127.0.0.1", 8080
+LOG_TO_CSV = True
+
+
+Tip: Keep API_HOST = 127.0.0.1 for local use. If you want to view the dashboard from other devices on your LAN, change to API_HOST = "0.0.0.0" and allow the port in your firewall.
+
+Run it:
+
+python mesh_listen_v13.py
+
+
+Open the dashboard:
+
+http://127.0.0.1:8080/
+
+
+You should see the live cards and table. Click into Messenger (in the UI) to view and reply to threads.
+
+
