@@ -1,4 +1,4 @@
-# mesh_listen_v14.py
+# mesh_listen_v13_settings.py
 import time, logging, queue, csv, os, json, threading
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler
@@ -11,41 +11,53 @@ import meshtastic.tcp_interface  # type: ignore
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
 # --- Config ---
-def get_env_bool(key: str, default: bool) -> bool:
-    """Get boolean environment variable with fallback."""
-    val = os.getenv(key, "").lower()
-    if val in ("true", "1", "yes", "on"): return True
-    if val in ("false", "0", "no", "off"): return False
-    return default
-
-def get_env_float(key: str, default: float) -> float:
-    """Get float environment variable with fallback."""
-    try:
-        return float(os.getenv(key, str(default)))
-    except (ValueError, TypeError):
-        return default
-
-def get_env_int(key: str, default: int) -> int:
-    """Get integer environment variable with fallback."""
-    try:
-        return int(os.getenv(key, str(default)))
-    except (ValueError, TypeError):
-        return default
-
-HOST = os.getenv("MESH_HOST", "192.168.0.91")          # Meshtastic node IP (your gateway)
-REFRESH_EVERY = get_env_float("REFRESH_EVERY", 5.0)     # console table refresh seconds
-SHOW_UNKNOWN = get_env_bool("SHOW_UNKNOWN", True)
-SHOW_PER_PACKET = get_env_bool("SHOW_PER_PACKET", True)
-LOG_TO_CSV = get_env_bool("LOG_TO_CSV", True)
-LOG_PREFIX = os.getenv("LOG_PREFIX", "meshtastic_log")
+HOST = "192.168.0.91"          # Meshtastic node IP (your gateway)
+REFRESH_EVERY = 5.0            # console table refresh seconds
+SHOW_UNKNOWN = True
+SHOW_PER_PACKET = True
+LOG_TO_CSV = True
+LOG_PREFIX = "meshtastic_log"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-API_HOST = os.getenv("API_HOST", "127.0.0.1")
-API_PORT = get_env_int("API_PORT", 8080)
+API_HOST, API_PORT = "127.0.0.1", 8080
 
 # History / chat
-HISTORY_MAXLEN = get_env_int("HISTORY_MAXLEN", 300)           # chart: last N points per node
-HISTORY_SAMPLE_SECS = get_env_float("HISTORY_SAMPLE_SECS", 2.0)      # chart: min spacing between points
-MAX_MSGS_PER_CONV = get_env_int("MAX_MSGS_PER_CONV", 2000)       # chat: per-conversation ring size
+HISTORY_MAXLEN = 300           # chart: last N points per node
+HISTORY_SAMPLE_SECS = 2.0      # chart: min spacing between points
+MAX_MSGS_PER_CONV = 2000       # chat: per-conversation ring size
+
+# --- Settings (persistent) ---
+SETTINGS_PATH = os.path.join(SCRIPT_DIR, "settings.json")
+settings_lock = threading.Lock()
+DEFAULT_SETTINGS = {
+    "units": {"temp":"F", "pressure":"hPa", "alt":"ft", "time":"12h"},
+    "ui": {"rememberScroll": True, "theme":"dark", "cardDensity":"comfy", "autoScrollChat": True},
+    "data": {"historyMax": HISTORY_MAXLEN, "sampleSecs": HISTORY_SAMPLE_SECS, "csvRetentionDays": 14, "autoScaleCharts": True},
+    "msg": {"defaultTarget":"last_peer", "requestAck": True, "retry": 1, "hideSelfAsRecipient": True, "readOnly": False},
+    "nodes": {"hideStaleMins": 0, "sortBy":"updated", "aliases": {}},
+    "net": {"meshHost": HOST, "meshPort": 4403}
+}
+def _load_settings():
+    try:
+        with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+            s = json.load(f)
+            # shallow merge
+            out = DEFAULT_SETTINGS.copy()
+            for k,v in (s or {}).items():
+                if isinstance(v, dict) and isinstance(out.get(k), dict):
+                    nv = out[k].copy(); nv.update(v); out[k] = nv
+                else:
+                    out[k] = v
+            return out
+    except Exception:
+        return DEFAULT_SETTINGS.copy()
+
+def _save_settings(s):
+    tmp = SETTINGS_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(s, f, indent=2)
+    os.replace(tmp, SETTINGS_PATH)
+
+settings = _load_settings()
 
 # --- Console handoff ---
 outq: "queue.Queue[tuple[str, object]]" = queue.Queue()
@@ -63,7 +75,7 @@ g_iface = None
 my_id: str | None = None  # our local node ID like "!a0cb0f88" (when detected)
 
 # Rolling history: nodeId -> deque of dict points
-# point keys: t (epoch), batt, temp (°F), press, rh, rssi, snr
+# point keys: t (epoch), batt, temp (°F stored), press (hPa), rh, rssi, snr
 hist_lock = threading.Lock()
 history: dict[str, deque] = defaultdict(lambda: deque(maxlen=HISTORY_MAXLEN))
 last_hist_time: dict[str, float] = {}
@@ -164,7 +176,7 @@ def parse_pair_conv(cid: str) -> tuple[str,str] | None:
 
 def disp_name(node_id: str | None) -> str:
     if not node_id: return "unknown"
-    return node_names.get(node_id) or node_id
+    return settings["nodes"]["aliases"].get(node_id) or node_names.get(node_id) or node_id
 
 def _record_recent_send(to_id: str, text: str, ts: float):
     with recent_sends_lock:
@@ -236,7 +248,7 @@ def _record_history(node_id: str, rec: dict, now: float):
         "t": now,
         "batt": rec.get("batt"),
         "temp": tf,                       # Fahrenheit in history
-        "press": rec.get("press_hpa"),
+        "press": rec.get("press_hpa"),    # hPa
         "rh": rec.get("rh"),
         "rssi": rec.get("rssi"),
         "snr": rec.get("snr"),
@@ -368,7 +380,7 @@ def handle_packet(pkt: dict):
         _record_history(frm, rec, now)
         _touch_broadcast()
 
-# --- console table (°F) ---
+# --- console table (°F in console, same as before) ---
 def render_table():
     with nodes_lock:
         snap = list(sorted(nodes.items(), key=lambda kv: kv[1].get("updated") or 0, reverse=True))
@@ -390,10 +402,11 @@ def render_table():
 
 # --- JSON snapshot ---
 def _nodes_json_snapshot():
-    with nodes_lock:
+    with nodes_lock, settings_lock:
         now_iso = datetime.now().isoformat(timespec="seconds")
         out = {"connected": _connected, "server_time": now_iso, "nodes": {}, "my_id": my_id,
-               "my_name": (node_names.get(my_id) if my_id else None), "names": node_names}
+               "my_name": (disp_name(my_id) if my_id else None), "names": node_names,
+               "settings": settings}
         for k,v in nodes.items():
             out["nodes"][k] = {
                 **v,
@@ -419,13 +432,19 @@ def _conversations_snapshot():
     with msg_lock:
         conv_keys = set(messages.keys())
 
-    # Seed with ANY known nodes (from traffic OR radio map), one per line, paired with me
+    # Seed with ANY known nodes (from traffic OR radio map), paired with me
     known_ids = set(node_names.keys())
     with nodes_lock:
         known_ids.update(nodes.keys())
+
+    with settings_lock:
+        hide_self = settings["msg"].get("hideSelfAsRecipient", True)
+
     if my_id:
-        peers = [nid for nid in known_ids if nid != my_id]
+        peers = [nid for nid in known_ids if (nid != my_id or not hide_self)]
         for nid in peers:
+            if nid == my_id and hide_self:
+                continue
             conv_keys.add(pair_conv_id(my_id, nid))
 
     out = []
@@ -442,6 +461,8 @@ def _conversations_snapshot():
                 a, b = pair
                 if my_id and (my_id == a or my_id == b):
                     peer = b if my_id == a else a
+                    if hide_self and peer == my_id:
+                        continue
                     nm = disp_name(peer)
                     last_t = last_msg_ts.get(cid, 0.0)
                     if last_t == 0.0:
@@ -479,7 +500,7 @@ def _messages_snapshot(conv_id: str, limit: int | None = None, since: float | No
 def _touch_broadcast():
     pass
 
-# --- HTML (dashboard & chat) ---
+# --- HTML (simple, pretty with dashboard/chat/settings) ---
 
 DASHBOARD_SIMPLE = """<!doctype html>
 <html><meta charset="utf-8"/><title>Meshtastic Simple</title>
@@ -495,8 +516,24 @@ async function fetchNodes(){
   const r=await fetch('/api/nodes?t='+Date.now(),{cache:'no-store'});
   return await r.json();
 }
+function unitize(v, kind, cfg){
+  if(v==null) return '-';
+  const n=Number(v); if(!isFinite(n)) return '-';
+  if(kind==='temp'){
+    return (cfg.units.temp==='C') ? ((n-32)*5/9).toFixed(2) : n.toFixed(2);
+  }
+  return n.toFixed(2);
+}
+function unitLabels(cfg){
+  return {
+    temp: cfg.units.temp==='C'?'T(°C)':'T(°F)',
+    press: 'P(hPa)',
+  };
+}
 function asTable(snap){
-  const header = ["Node".padEnd(16),"Batt%","V","T(°F)","P(hPa)","RH%","RSSI","SNR","Lat","Lon","Alt","Last Text".padEnd(24),"Updated"].join(" | ");
+  const cfg = snap.settings || {units:{temp:'F'}};
+  const lbl = unitLabels(cfg);
+  const header = ["Node".padEnd(16),"Batt%","V",lbl.temp,"P(hPa)","RH%","RSSI","SNR","Lat","Lon","Alt","Last Text".padEnd(24),"Updated"].join(" | ");
   const bar = "-".repeat(header.length);
   const rows=[header,bar];
   const items=Object.entries(snap.nodes).sort((a,b)=>(b[1].updated_epoch||0)-(a[1].updated_epoch||0));
@@ -506,7 +543,7 @@ function asTable(snap){
       String(name).padEnd(16),
       v.batt==null?"-":Number(v.batt).toFixed(0),
       v.voltage==null?"-":Number(v.voltage).toFixed(2),
-      v.temp_f==null?"-":Number(v.temp_f).toFixed(2),
+      v.temp_f==null?"-":unitize(v.temp_f,'temp',cfg),
       v.press_hpa==null?"-":Number(v.press_hpa).toFixed(2),
       v.rh==null?"-":Number(v.rh).toFixed(1),
       v.rssi==null?"-":Number(v.rssi).toFixed(0),
@@ -593,6 +630,15 @@ tr:last-child td{border-bottom:none}
 .compose button:disabled{opacity:.6;cursor:not-allowed}
 .hide{display:none}
 .warnTxt{font-size:11px;color:#f3b32a;margin-left:8px}
+
+/* Settings */
+#settings.hide{display:none}
+.form{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px}
+.form h3{margin:6px 0 10px}
+.row{display:flex;flex-wrap:wrap;gap:14px;margin:8px 0}
+.row label{font-size:13px;color:var(--muted)}
+.row select,.row input[type=checkbox]{margin-left:6px}
+.saveok{color:#7ce2a9;font-size:12px;margin-left:8px}
 </style>
 
 <div class="wrap">
@@ -600,6 +646,7 @@ tr:last-child td{border-bottom:none}
   <div class="nav">
     <button id="tabDash" class="active">Dashboard</button>
     <button id="tabChat">Messages</button>
+    <button id="tabSettings">Settings</button>
   </div>
   <div class="meta" id="meta">loading…</div>
 
@@ -607,7 +654,7 @@ tr:last-child td{border-bottom:none}
   <div id="dash">
     <div class="grid" id="cards"></div>
     <div class="table">
-      <table id="tbl"><thead><tr>
+      <table id="tbl"><thead><tr id="tblHead">
         <th>Node</th><th>Batt%</th><th>V</th><th>T(°F)</th><th>P(hPa)</th><th>RH%</th><th>RSSI</th><th>SNR</th><th>Lat</th><th>Lon</th><th>Alt</th><th>Updated</th>
       </tr></thead><tbody></tbody></table>
     </div>
@@ -637,6 +684,43 @@ tr:last-child td{border-bottom:none}
       </div>
     </div>
   </div>
+
+  <!-- SETTINGS -->
+  <div id="settings" class="hide">
+    <div class="form">
+      <h3>Units</h3>
+      <div class="row">
+        <label>Temperature
+          <select id="setTemp"><option value="F">°F</option><option value="C">°C</option></select>
+        </label>
+        <label>Pressure
+          <select id="setPress"><option value="hPa">hPa</option><option value="inHg">inHg</option></select>
+        </label>
+        <label>Altitude
+          <select id="setAlt"><option value="ft">ft</option><option value="m">m</option></select>
+        </label>
+        <label>Time
+          <select id="setTime"><option value="12h">12h</option><option value="24h">24h</option></select>
+        </label>
+      </div>
+
+      <h3>Chat</h3>
+      <div class="row">
+        <label><input type="checkbox" id="setHideSelf"> Hide my node in recipient list</label>
+        <label><input type="checkbox" id="setAck"> Request ACK</label>
+        <label><input type="checkbox" id="setReadOnly"> Read-only (disable send)</label>
+      </div>
+
+      <h3>UI</h3>
+      <div class="row">
+        <label><input type="checkbox" id="setScroll"> Remember scroll on refresh</label>
+      </div>
+
+      <div class="row">
+        <button id="saveBtn">Save settings</button><span id="saveOk" class="saveok hide">Saved ✓</span>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -649,18 +733,51 @@ let names = {};
 let sendTarget = null; // current recipient id (or '^all')
 let convTimer = null;  // refresh conversation list
 let warnTimer = null;  // send warning timer
+let cfg = null;        // settings from server
 
 function battClass(b){ if(b==null) return ''; if(b<=15) return 'bad'; if(b<=30) return 'warn'; return 'ok'; }
 function battPct(b){ return (b==null)?0:Math.max(0,Math.min(100,Number(b)||0)); }
 function nice(v,d=2){ if(v==null||v===undefined) return '-'; const n=Number(v); return isFinite(n)?n.toFixed(d):v; }
-function timeStr(iso){ return iso ? new Date(iso).toLocaleTimeString() : '-'; }
-function dispName(id){ if(!id) return 'unknown'; if(id===myId) return myName || (names[id]||id); return names[id] || id; }
+function timeStrISO(iso){
+  if(!iso) return '-';
+  const dt=new Date(iso);
+  const opt={hour:'numeric',minute:'2-digit',second:'2-digit', hour12: (cfg && cfg.units && cfg.units.time==='12h')};
+  return dt.toLocaleTimeString(undefined,opt);
+}
+function dispName(id){ if(!id) return 'unknown'; if(id===myId) return myName || (names[id]||id); return (cfg?.nodes?.aliases?.[id]) || names[id] || id; }
+
+// Units conversions
+function toTempDisplay(tempF){
+  if(tempF==null) return null;
+  const n=Number(tempF); if(!isFinite(n)) return null;
+  if(cfg?.units?.temp==='C'){ return ( (n-32)*5/9 ); }
+  return n;
+}
+function tempLabel(){ return (cfg?.units?.temp==='C') ? '°C' : '°F'; }
+
+function toPressDisplay(hpa){
+  if(hpa==null) return null;
+  const n=Number(hpa); if(!isFinite(n)) return null;
+  if(cfg?.units?.pressure==='inHg'){ return n * 0.0295299830714; }
+  return n;
+}
+function pressLabel(){ return (cfg?.units?.pressure==='inHg') ? 'inHg' : 'hPa'; }
+
+function toAltDisplay(m){
+  if(m==null) return null;
+  const n=Number(m); if(!isFinite(n)) return null;
+  if(cfg?.units?.alt==='ft'){ return n * 3.28084; }
+  return n;
+}
+function altLabel(){ return (cfg?.units?.alt==='ft') ? 'ft' : 'm'; }
+
 async function fetchJSON(url, opts){ const r=await fetch(url,opts||{cache:'no-store'}); return await r.json(); }
 
 //// DASHBOARD ////
 async function loadDashboard(){
-  const sx = window.scrollX || 0;
-  const sy = window.scrollY || document.documentElement.scrollTop || 0;
+  const remember = !!(cfg && cfg.ui && cfg.ui.rememberScroll);
+  const sx = remember ? (window.scrollX || 0) : 0;
+  const sy = remember ? (window.scrollY || document.documentElement.scrollTop || 0) : 0;
 
   const [snap, hist] = await Promise.all([
     fetchJSON('/api/nodes?t='+Date.now()),
@@ -669,9 +786,18 @@ async function loadDashboard(){
   myId = snap.my_id || null;
   myName = snap.my_name || null;
   names = snap.names || {};
+  cfg = snap.settings || cfg;
 
   document.getElementById('meta').textContent =
     `connected=${snap.connected} | server=${snap.server_time} | nodes=${Object.keys(snap.nodes).length}`;
+
+  // update table headers for units
+  const th = document.getElementById('tblHead');
+  th.innerHTML = `
+    <th>Node</th><th>Batt%</th><th>V</th>
+    <th>T(${tempLabel()})</th><th>P(${pressLabel()})</th><th>RH%</th>
+    <th>RSSI</th><th>SNR</th><th>Lat</th><th>Lon</th><th>Alt(${altLabel()})</th><th>Updated</th>
+  `;
 
   const cards = document.getElementById('cards');
   for (const k in charts) { try { charts[k].destroy(); } catch (e) {} delete charts[k]; }
@@ -684,7 +810,9 @@ async function loadDashboard(){
     const cid = 'c_'+id.replace(/[^a-zA-Z0-9_]/g,'_');
     const lat = (v.lat==null)? null : Number(v.lat).toFixed(5);
     const lon = (v.lon==null)? null : Number(v.lon).toFixed(5);
-    const alt = (v.alt==null)? null : Number(v.alt).toFixed(0);
+    const altDisp = toAltDisplay(v.alt); const altTxt = (altDisp==null? '-' : altDisp.toFixed(0)+' '+altLabel());
+    const pressDisp = toPressDisplay(v.press_hpa);
+    const tempDisp = toTempDisplay(v.temp_f);
     const mapLink = (lat && lon) ? `<a href="https://maps.google.com/?q=${lat},${lon}" target="_blank" rel="noopener">map</a>` : '';
 
     const card = document.createElement('div');
@@ -694,14 +822,14 @@ async function loadDashboard(){
       <div class="kv">
         <div>Battery<b class="${battClass(v.batt)}">${nice(v.batt,0)}%</b></div>
         <div>Voltage<b>${nice(v.voltage,2)} V</b></div>
-        <div>Temp<b>${nice(v.temp_f,1)} °F</b></div>
-        <div>Pressure<b>${nice(v.press_hpa,1)} hPa</b></div>
+        <div>Temp<b>${tempDisp==null?'-':tempDisp.toFixed(1)} ${tempLabel()}</b></div>
+        <div>Pressure<b>${pressDisp==null?'-':pressDisp.toFixed(2)} ${pressLabel()}</b></div>
         <div>RH<b>${nice(v.rh,1)} %</b></div>
         <div>RSSI<b>${nice(v.rssi,0)} dBm</b></div>
         <div>SNR<b>${nice(v.snr,2)} dB</b></div>
         <div>GPS<b>${lat && lon ? (lat+', '+lon) : '-'}</b>${mapLink}</div>
-        <div>Alt<b>${alt ? (alt+' m') : '-'}</b></div>
-        <div>Updated<b>${timeStr(v.updated_iso)}</b></div>
+        <div>Alt<b>${altTxt}</b></div>
+        <div>Updated<b>${timeStrISO(v.updated_iso)}</b></div>
       </div>
       <div class="bar"><span style="width:${battPct(v.batt)}%"></span></div>
       <div class="small">${(v.text||'-')}</div>
@@ -710,14 +838,19 @@ async function loadDashboard(){
     cards.appendChild(card);
 
     const ctx = card.querySelector('canvas').getContext('2d');
-    const labels = h.map(p => new Date(p.t*1000).toLocaleTimeString());
+    // history temp is stored in °F; convert if needed
+    const labels = h.map(p => new Date(p.t*1000).toLocaleTimeString(undefined,{hour12:(cfg?.units?.time==='12h')}));
     const dsBatt = h.map(p => p.batt);
-    const dsTemp = h.map(p => p.temp); // °F
+    const dsTemp = h.map(p => {
+      if(p.temp==null) return null;
+      return (cfg?.units?.temp==='C') ? ((p.temp-32)*5/9) : p.temp;
+    });
+    const tLabel = 'Temp ' + tempLabel();
     charts[cid]=new Chart(ctx, {
       type:'line',
       data:{labels, datasets:[
         {label:'Battery %', data: dsBatt, yAxisID:'y1', tension:.3},
-        {label:'Temp °F', data: dsTemp, yAxisID:'y2', tension:.3}
+        {label:tLabel, data: dsTemp, yAxisID:'y2', tension:.3}
       ]},
       options:{
         animation:false,
@@ -735,13 +868,18 @@ async function loadDashboard(){
   for(const [id,v] of entries){
     const name=(v.name&&v.name.trim().length)?v.name:id;
     const tr=document.createElement('tr');
+    const tempD = toTempDisplay(v.temp_f);
+    const pressD = toPressDisplay(v.press_hpa);
+    const altD = toAltDisplay(v.alt);
     const cells=[
-      name, nice(v.batt,0), nice(v.voltage,2), nice(v.temp_f,1),
-      nice(v.press_hpa,1), nice(v.rh,1), nice(v.rssi,0), nice(v.snr,2),
+      name, nice(v.batt,0), nice(v.voltage,2),
+      (tempD==null?'-':tempD.toFixed(1)),
+      (pressD==null?'-':pressD.toFixed(2)),
+      nice(v.rh,1), nice(v.rssi,0), nice(v.snr,2),
       v.lat==null?'-':Number(v.lat).toFixed(5),
       v.lon==null?'-':Number(v.lon).toFixed(5),
-      v.alt==null?'-':Number(v.alt).toFixed(0),
-      timeStr(v.updated_iso)
+      (altD==null?'-':altD.toFixed(0)),
+      timeStrISO(v.updated_iso)
     ];
     cells.forEach((c,idx)=>{
       const td=document.createElement('td'); td.textContent=c;
@@ -751,7 +889,7 @@ async function loadDashboard(){
     tbody.appendChild(tr);
   }
 
-  requestAnimationFrame(()=>{ window.scrollTo(sx, sy); });
+  if(remember){ requestAnimationFrame(()=>{ window.scrollTo(sx, sy); }); }
 }
 
 //// CHAT UI ////
@@ -762,7 +900,7 @@ async function loadConversations(){
     const btn=document.createElement('button');
     btn.dataset.id = c.id;
     btn.onclick = ()=> selectConv(c.id, c.name);
-    btn.innerHTML = `<span class="name">${c.name}</span>`; // one per line, name only
+    btn.innerHTML = `<span class="name">${c.name}</span>`;
     if (activeConv && c.id===activeConv) btn.classList.add('active');
     wrap.appendChild(btn);
   }
@@ -779,7 +917,8 @@ function renderMsg(m){
   div.className='bubble ' + (me?'me':'them');
   const who = me ? 'You' : (dispName(m.fromId || ''));
   const tag = (m.scope==='broadcast') ? `<span class="tag">broadcast</span>` : '';
-  div.innerHTML = `${tag}${m.text}<div class="meta">${who} · ${new Date(m.epoch*1000).toLocaleTimeString()}${m.rssi!=null? ' · rssi '+m.rssi:''}</div>`;
+  const opt={hour:'numeric',minute:'2-digit',second:'2-digit', hour12:(cfg?.units?.time==='12h')};
+  div.innerHTML = `${tag}${m.text}<div class="meta">${who} · ${new Date(m.epoch*1000).toLocaleTimeString(undefined,opt)}${m.rssi!=null? ' · rssi '+m.rssi:''}</div>`;
   return div;
 }
 async function fetchMessages(conv, since, includeBroadcast){
@@ -800,16 +939,17 @@ function headerFor(cid){
   }
   return `${dispName(a)} \u2194 ${dispName(b)}`;
 }
-function toFor(cid){
+function peerForConv(cid, msgList){
   if(cid==='^all') return '^all';
   const pair = cid.startsWith('pair:') ? cid.slice(5).split('|') : null;
   if(!pair) return null;
   const [a,b] = pair;
-  if(myId && (myId===a || myId===b)){
-    return (myId===a)? b : a; // ALWAYS the other device
+  if(myId && (myId===a || myId===b)) return (myId===a)? b : a;
+  if(msgList && msgList.length){
+    const last = msgList[msgList.length-1];
+    if(last && last.fromId && last.fromId!=='^all') return last.fromId;
   }
-  // If myId unknown, let server enforce peer (we'll send empty 'to')
-  return null;
+  return b;
 }
 let chatVisible=false;
 
@@ -817,47 +957,28 @@ async function selectConv(id, name){
   activeConv = id; lastMsgSeen = 0;
 
   const snap = await fetchJSON('/api/nodes?t='+Date.now());
-  myId = snap.my_id || null; myName = snap.my_name || null; names = snap.names || {};
+  myId = snap.my_id || null; myName = snap.my_name || null; names = snap.names || {}; cfg = snap.settings || cfg;
 
-  // Load recent messages first so we can guess a peer even if myId is unknown
   const includeB = (id !== '^all');
   const list = await fetchMessages(id, null, includeB);
 
-  // Decide send target:
-  function peerFromConv(){
-    if(id==='^all') return '^all';
-    const pair = id.startsWith('pair:') ? id.slice(5).split('|') : null;
-    if(!pair) return null;
-    const [a,b] = pair;
-    if(myId && (myId===a || myId===b)) return (myId===a)? b : a;
-    // myId unknown → reply to the most recent sender if possible
-    if(list && list.length){
-      const last = list[list.length-1];
-      if(last && last.fromId && last.fromId!=='^all') return last.fromId;
-    }
-    // fallback: pick the second id arbitrarily
-    return b;
-  }
-
-  sendTarget = peerFromConv();
+  sendTarget = peerForConv(id, list);
 
   const toLabel = (id==='^all') ? 'Broadcast' : (sendTarget ? dispName(sendTarget) : '(selecting peer…)');
   document.getElementById('convTitle').textContent = headerFor(id);
   document.getElementById('toWrap').textContent = (id==='^all') ? 'To: Broadcast' : ('To: ' + toLabel);
   document.getElementById('meInfo').textContent = myId ? `me=${dispName(myId)}` : '';
 
-  // Enable composer
-  document.getElementById('sendBtn').disabled = false;
-  document.getElementById('msgBox').disabled = false;
+  const ro = !!(cfg && cfg.msg && cfg.msg.readOnly);
+  document.getElementById('sendBtn').disabled = ro;
+  document.getElementById('msgBox').disabled = ro;
 
-  // Render history
   const box = document.getElementById('msgs'); box.innerHTML='';
   list.forEach(m=> box.appendChild(renderMsg(m)));
   box.scrollTop = box.scrollHeight;
   if(list.length) lastMsgSeen = list[list.length-1].epoch;
   setActiveConvButton();
 }
-
 
 async function pollActive(){
   if(!activeConv || !chatVisible) return;
@@ -873,6 +994,7 @@ async function pollActive(){
 }
 function showSendWarn(show){ const el=document.getElementById('sendWarn'); if(show) el.classList.remove('hide'); else el.classList.add('hide'); }
 async function sendCurrent(){
+  if(cfg && cfg.msg && cfg.msg.readOnly) return;
   const input = document.getElementById('msgBox');
   const btn = document.getElementById('sendBtn');
   const text = input.value.trim();
@@ -882,8 +1004,8 @@ async function sendCurrent(){
   btn.disabled = true; showSendWarn(false);
   try{
     const payload = (activeConv==='^all')
-      ? { to: '^all', text, channelIndex: 0, wantAck: true }
-      : { conv: activeConv, to: (sendTarget||''), text, channelIndex: 0, wantAck: true };
+      ? { to: '^all', text, channelIndex: 0, wantAck: !!(cfg?.msg?.requestAck) }
+      : { conv: activeConv, to: (sendTarget||''), text, channelIndex: 0, wantAck: !!(cfg?.msg?.requestAck) };
 
     const r = await fetch('/api/send', {
       method:'POST', headers:{'Content-Type':'application/json'},
@@ -893,19 +1015,16 @@ async function sendCurrent(){
     if(!r.ok){
       alert('Send failed: '+(res.error||r.status));
     }else{
-      // optimistic render
       const now = Date.now()/1000;
       const box = document.getElementById('msgs');
       const m = { epoch: now, fromId: myId||'me', toId: (payload.to===''?undefined:payload.to), text: text, scope: (activeConv==='^all'?'broadcast':'dm') };
       const dom = renderMsg(m);
-      // add lightweight "✓ sent" status
       const meta = dom.querySelector('.meta');
       if(meta){ meta.textContent += ' · ✓ sent'; }
       box.appendChild(dom); box.scrollTop = box.scrollHeight;
       lastMsgSeen = now;
       input.value = '';
 
-      // after 15s, show unconfirmed warning if nothing new arrived
       clearTimeout(warnTimer);
       warnTimer = setTimeout(()=>{ showSendWarn(true); }, 15000);
     }
@@ -913,28 +1032,85 @@ async function sendCurrent(){
   finally{ btn.disabled = false; input.focus(); }
 }
 
+//// SETTINGS UI ////
+async function loadSettings(){
+  const s = await fetchJSON('/api/settings?t='+Date.now());
+  cfg = s || cfg;
+  document.getElementById('setTemp').value = cfg.units.temp || 'F';
+  document.getElementById('setPress').value = cfg.units.pressure || 'hPa';
+  document.getElementById('setAlt').value = cfg.units.alt || 'ft';
+  document.getElementById('setTime').value = cfg.units.time || '12h';
+  document.getElementById('setHideSelf').checked = !!cfg.msg.hideSelfAsRecipient;
+  document.getElementById('setAck').checked = !!cfg.msg.requestAck;
+  document.getElementById('setReadOnly').checked = !!cfg.msg.readOnly;
+  document.getElementById('setScroll').checked = !!cfg.ui.rememberScroll;
+}
+async function saveSettings(){
+  const body = {
+    units: {
+      temp: document.getElementById('setTemp').value,
+      pressure: document.getElementById('setPress').value,
+      alt: document.getElementById('setAlt').value,
+      time: document.getElementById('setTime').value
+    },
+    msg: {
+      hideSelfAsRecipient: document.getElementById('setHideSelf').checked,
+      requestAck: document.getElementById('setAck').checked,
+      readOnly: document.getElementById('setReadOnly').checked
+    },
+    ui: {
+      rememberScroll: document.getElementById('setScroll').checked
+    }
+  };
+  const r = await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  if(r.ok){
+    cfg = await r.json(); // server returns merged settings
+    const ok=document.getElementById('saveOk'); ok.classList.remove('hide'); setTimeout(()=>ok.classList.add('hide'), 1200);
+    // Refresh views to reflect new units
+    loadDashboard();
+    if(activeConv) selectConv(activeConv);
+  }else{
+    alert('Failed to save settings');
+  }
+}
+
 //// Tabs ////
 const tabDash = document.getElementById('tabDash');
 const tabChat = document.getElementById('tabChat');
+const tabSettings = document.getElementById('tabSettings');
 const viewDash = document.getElementById('dash');
 const viewChat = document.getElementById('chat');
-tabDash.onclick = ()=>{ chatVisible=false; clearInterval(convTimer); tabDash.classList.add('active'); tabChat.classList.remove('active'); viewDash.classList.remove('hide'); viewChat.classList.add('hide'); };
-tabChat.onclick = async ()=>{ chatVisible=true; tabChat.classList.add('active'); tabDash.classList.remove('active'); viewChat.classList.remove('hide'); viewDash.classList.add('hide'); await loadConversations(); clearInterval(convTimer); convTimer=setInterval(loadConversations, 3000); };
+const viewSettings = document.getElementById('settings');
+tabDash.onclick = ()=>{ chatVisible=false; clearInterval(convTimer);
+  tabDash.classList.add('active'); tabChat.classList.remove('active'); tabSettings.classList.remove('active');
+  viewDash.classList.remove('hide'); viewChat.classList.add('hide'); viewSettings.classList.add('hide');
+};
+tabChat.onclick = async ()=>{ chatVisible=true;
+  tabChat.classList.add('active'); tabDash.classList.remove('active'); tabSettings.classList.remove('active');
+  viewChat.classList.remove('hide'); viewDash.classList.add('hide'); viewSettings.classList.add('hide');
+  await loadConversations(); clearInterval(convTimer); convTimer=setInterval(loadConversations, 3000);
+};
+tabSettings.onclick = async ()=>{ chatVisible=false; clearInterval(convTimer);
+  tabSettings.classList.add('active'); tabDash.classList.remove('active'); tabChat.classList.remove('active');
+  viewSettings.classList.remove('hide'); viewDash.classList.add('hide'); viewChat.classList.add('hide');
+  await loadSettings();
+};
 
 //// Hooks ////
 document.getElementById('sendBtn').onclick = sendCurrent;
 document.getElementById('msgBox').addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ sendCurrent(); } });
+document.getElementById('saveBtn').onclick = saveSettings;
 
 //// Schedules ////
 setInterval(loadDashboard, 2000);
 setInterval(pollActive, 1000);
-loadDashboard();
+(async ()=>{ const snap=await fetch('/api/nodes?t='+Date.now()); cfg=(await snap.json()).settings; })().then(loadDashboard);
 </script>
 """
 
 # --- HTTP Handler ---
 class ApiHandler(BaseHTTPRequestHandler):
-    server_version = "MeshDash/12-chatfix"
+    server_version = "MeshDash/13-settings"
 
     def _hdr_json(self, code=200):
         self.send_response(code)
@@ -961,7 +1137,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                 conv = body.get("conv")  # optional pair conv id
                 text = (body.get("text") or "").strip()
                 ch = int(body.get("channelIndex", 0))
-                wantAck = bool(body.get("wantAck", True))
+                # wantAck default from settings if not provided
+                with settings_lock:
+                    wantAck = bool(body.get("wantAck", settings["msg"].get("requestAck", True)))
 
                 if not text:
                     self._hdr_json(400); self.wfile.write(json.dumps({"error":"empty text"}).encode("utf-8")); return
@@ -994,7 +1172,6 @@ class ApiHandler(BaseHTTPRequestHandler):
                     else:
                         g_iface.sendText(text, destinationId=to, channelIndex=ch, wantAck=wantAck)
                         _record_recent_send(to, text, ts)
-                        # For storage: prefer given conv; else compute if my_id is available.
                         conv_id = conv if conv else (pair_conv_id(my_id, to) if my_id else f"pair:{to}|{to}")
                         msg = {"epoch": ts, "iso": datetime.now().isoformat(timespec="seconds"),
                                "fromId": my_id or "me", "toId": to, "text": text, "scope": "dm"}
@@ -1002,6 +1179,18 @@ class ApiHandler(BaseHTTPRequestHandler):
                         self._hdr_json(200); self.wfile.write(json.dumps({"ok": True, "conv": conv_id}).encode("utf-8")); return
                 except Exception as e:
                     self._hdr_json(500); self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8")); return
+
+            if path == "/api/settings":
+                body = self._read_json()
+                with settings_lock:
+                    # shallow merge for units/msg/ui sections we accept
+                    for key in ("units","msg","ui","nodes","data","net"):
+                        if key in body and isinstance(body[key], dict):
+                            merged = settings.get(key, {}).copy()
+                            merged.update(body[key])
+                            settings[key] = merged
+                    _save_settings(settings)
+                    self._hdr_json(200); self.wfile.write(json.dumps(settings).encode("utf-8")); return
 
             self._hdr_json(404); self.wfile.write(json.dumps({"error":"not found"}).encode("utf-8"))
         except Exception as e:
@@ -1060,6 +1249,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                     except Exception: n = None
                 include_b = qs.get("include_broadcast", ["0"])[0] in ("1","true","True")
                 self._hdr_json(); self.wfile.write(json.dumps(_messages_snapshot(conv, n, since, include_b)).encode("utf-8")); return
+            if path == "/api/settings":
+                with settings_lock:
+                    self._hdr_json(); self.wfile.write(json.dumps(settings).encode("utf-8")); return
 
             self._hdr_json(404); self.wfile.write(json.dumps({"error":"not found"}).encode("utf-8"))
         except Exception as e:
@@ -1072,7 +1264,7 @@ def start_api_server():
     httpd = HTTPServer((API_HOST, API_PORT), ApiHandler)
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
-    say(f"[API] Live on http://{API_HOST}:{API_PORT} (pretty=/ , simple=/simple)")
+    say(f"[API] Live on http://{API_HOST}:{API_PORT} (pretty=/ , simple=/simple , settings=/api/settings)")
 
 # --- main loop w/ auto-reconnect ---
 def main():
@@ -1113,4 +1305,6 @@ def main():
 
 if __name__=="__main__":
     main()
+
+
 
