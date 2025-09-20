@@ -1,4 +1,4 @@
-# mesh_listen_v15_settings.py
+# mesh_listen_v14_settings.py
 import time, logging, queue, csv, os, json, threading
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler
@@ -7,6 +7,7 @@ from urllib.parse import urlparse, parse_qs
 from collections import deque, defaultdict
 from pubsub import pub
 import meshtastic.tcp_interface  # type: ignore
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
@@ -58,7 +59,8 @@ MAX_MSGS_PER_CONV = get_env_int("MAX_MSGS_PER_CONV", 2000)
 
 # --- Runtime Settings (persistent) ---
 SETTINGS_FILE = os.path.join(SCRIPT_DIR, "settings.json")
-settings_lock = threading.Lock()
+import threading
+settings_lock = threading.RLock()
 DEFAULT_SETTINGS = {
     "unit_temp": (os.getenv("UNIT_TEMP") or "F").upper(),     # "F" or "C"
     "want_ack_default": get_env_bool("WANT_ACK_DEFAULT", True),
@@ -68,6 +70,7 @@ DEFAULT_SETTINGS = {
     "log_to_csv": LOG_TO_CSV,
     "show_unknown": SHOW_UNKNOWN,
     "show_per_packet": SHOW_PER_PACKET,
+    "conv_recent_hours": get_env_int("CONV_RECENT_HOURS", 48),
 }
 settings = DEFAULT_SETTINGS.copy()
 
@@ -118,6 +121,7 @@ def _apply_settings_locked():
         _resize_history(new_ml)
     HISTORY_SAMPLE_SECS = as_float(settings.get("history_sample_secs", HISTORY_SAMPLE_SECS), HISTORY_SAMPLE_SECS)
 
+
 def _load_settings():
     try:
         if os.path.exists(SETTINGS_FILE):
@@ -133,11 +137,12 @@ def _load_settings():
 
 def _save_settings():
     try:
-        with settings_lock:
-            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-                json.dump(settings, f, indent=2)
+        # caller already holds settings_lock
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2)
     except Exception as e:
         say(f"[Settings] save failed: {e}")
+
 
 # --- mesh helpers ---
 def _refresh_names_from(iface):
@@ -430,34 +435,93 @@ def _history_json_snapshot(limit_per_node: int | None):
         return result
 
 def _conversations_snapshot():
-    with msg_lock: conv_keys = set(messages.keys())
-    known_ids = set(node_names.keys())
-    with nodes_lock: known_ids.update(nodes.keys())
-    if my_id:
-        for nid in [x for x in known_ids if x != my_id]:
-            conv_keys.add(pair_conv_id(my_id, nid))
+    # How recent a node must be to appear in the list
+    with settings_lock:
+        recent_hours = as_int(settings.get("conv_recent_hours", 48), 48)
+    cutoff = time.time() - recent_hours * 3600
 
+    # Start with any conversations that already have messages
+    with msg_lock:
+        conv_keys = set(messages.keys())
+
+    # Always include Broadcast
+    conv_keys.add("^all")
+
+    # Collect known node IDs from names and live node state
+    known_ids = set(node_names.keys())
+    with nodes_lock:
+        known_ids.update(nodes.keys())
+
+    def last_activity_for(nid: str) -> float:
+        """Latest of node 'updated', DM last message, or broadcast from this nid."""
+        t = 0.0
+        with nodes_lock:
+            t = max(t, (nodes.get(nid) or {}).get("updated") or 0.0)
+
+        with msg_lock:
+            # DM last timestamp for the expected pair id
+            dm_key = pair_conv_id(my_id, nid) if my_id else f"pair:{nid}|{nid}"
+            t = max(t, last_msg_ts.get(dm_key, 0.0))
+            # Any broadcast from this nid
+            for m in messages.get("^all", deque()):
+                if m.get("fromId") == nid:
+                    t = max(t, m.get("epoch", 0.0))
+        return t
+
+    # Seed DM pairs:
+    # - If we know my_id: proper pair(!me|!peer)
+    # - If not: a safe degenerate pair(!peer|!peer) so you can still send
+    if my_id:
+        peers = [nid for nid in known_ids if nid != my_id]
+        for nid in peers:
+            if last_activity_for(nid) >= cutoff:
+                conv_keys.add(pair_conv_id(my_id, nid))
+    else:
+        for nid in known_ids:
+            if last_activity_for(nid) >= cutoff:
+                conv_keys.add(f"pair:{nid}|{nid}")
+
+    # Build list with names + last activity
     out = []
-    for cid in conv_keys or []:
+    for cid in conv_keys:
         if cid == "^all":
-            nm = "Broadcast (^all)"; last_t = last_msg_ts.get(cid, 0.0)
+            nm = "Broadcast (^all)"
+            with msg_lock:
+                last_t = last_msg_ts.get(cid, 0.0)
+            out.append({"id": cid, "name": nm, "last_epoch": last_t})
+            continue
+
+        pair = parse_pair_conv(cid)
+        if not pair:
+            with msg_lock:
+                last_t = last_msg_ts.get(cid, 0.0)
+            out.append({"id": cid, "name": cid, "last_epoch": last_t})
+            continue
+
+        a, b = pair
+        # Label: if degenerate (!peer|!peer) show single peer name
+        if a == b:
+            peer = a
+            nm = disp_name(peer)
+        elif my_id and (my_id == a or my_id == b):
+            peer = b if my_id == a else a
+            nm = disp_name(peer)
         else:
-            pair = parse_pair_conv(cid)
-            if not pair:
-                nm = cid; last_t = last_msg_ts.get(cid, 0.0)
-            else:
-                a,b = pair
-                if my_id and (my_id==a or my_id==b):
-                    peer = b if my_id==a else a
-                    nm = disp_name(peer); last_t = last_msg_ts.get(cid, 0.0)
-                    if last_t == 0.0:
-                        with nodes_lock: last_t = (nodes.get(peer) or {}).get("updated") or 0.0
-                else:
-                    nm = f"{disp_name(a)} \u2194 {disp_name(b)}"; last_t = last_msg_ts.get(cid, 0.0)
+            peer = b
+            nm = f"{disp_name(a)} \u2194 {disp_name(b)}"
+
+        with msg_lock:
+            last_t = last_msg_ts.get(cid, 0.0)
+        if last_t == 0.0:
+            with nodes_lock:
+                last_t = (nodes.get(peer) or {}).get("updated") or 0.0
+
         out.append({"id": cid, "name": nm, "last_epoch": last_t})
 
-    out.sort(key=lambda x: (x["id"]!="^all", -x["last_epoch"], x["name"].lower()))
+    # Broadcast pinned, then newest activity
+    out.sort(key=lambda x: (x["id"] != "^all", -x["last_epoch"], x["name"].lower()))
     return out
+
 
 def _messages_snapshot(conv_id: str, limit: int | None = None, since: float | None = None, include_broadcast: bool = False):
     with msg_lock: base = list(messages.get(conv_id, deque()))
@@ -786,13 +850,18 @@ async function fetchMessages(conv, since, includeBroadcast){
   return await fetchJSON(url);
 }
 function headerFor(cid){
-  if(cid==='^all') return 'Broadcast (^all)';
+  if (cid === '^all') return 'Broadcast (^all)';
   const pair = cid.startsWith('pair:') ? cid.slice(5).split('|') : null;
-  if(!pair) return cid;
+  if (!pair) return cid;
   const [a,b] = pair;
-  if(myId && (myId===a || myId===b)){ const peer = (myId===a)? b : a; return dispName(peer); }
+  if (a === b) return dispName(a); // degenerate pair → show single peer
+  if (myId && (myId===a || myId===b)){
+    const peer = (myId===a)? b : a;
+    return dispName(peer);
+  }
   return `${dispName(a)} \u2194 ${dispName(b)}`;
 }
+
 let chatVisible=false;
 async function selectConv(id){
   activeConv = id; lastMsgSeen = 0;
@@ -1196,6 +1265,8 @@ def main():
 
 if __name__=="__main__":
     main()
+
+
 
 
 
